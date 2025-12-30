@@ -4,18 +4,138 @@ import { GoogleGenAI, Type, Modality } from "@google/genai";
 const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 /**
- * Strips AI meta-commentary and only keeps lines starting with Speaker names.
- * Handles both Chinese and English colons.
+ * 清洗脚本：提取对话行，兼容中英文冒号
  */
 export function cleanScript(text: string): string {
   if (!text) return '';
   const lines = text.split('\n');
   const dialogueLines = lines.filter(line => {
     const trimmed = line.trim();
-    // Match common speaker patterns like "小王:", "张老师:", "小王：", "张老师："
     return /^[^：:]+[：:]/.test(trimmed);
   });
   return dialogueLines.join('\n');
+}
+
+/**
+ * 步骤 0：识别热词类型（个股 vs 产业）
+ */
+async function identifyCategory(keyword: string): Promise<'STOCK' | 'INDUSTRY'> {
+  const ai = getAI();
+  const response = await ai.models.generateContent({
+    model: 'gemini-3-flash-preview',
+    contents: `判断以下财经热词属于“个股/具体公司”还是“宏观产业/行业板块/主题概念”：
+    热词：“${keyword}”
+    只需回复单词：STOCK 或 INDUSTRY。`,
+  });
+  const result = response.text?.trim().toUpperCase();
+  return result?.includes('STOCK') ? 'STOCK' : 'INDUSTRY';
+}
+
+/**
+ * 优化后的核心素材搜集函数
+ */
+export async function collectMaterials(keyword: string) {
+  const category = await identifyCategory(keyword);
+  const ai = getAI();
+  const today = new Date().toISOString().split('T')[0];
+
+  // 构建定向搜索提示词
+  let systemPrompt = '';
+  if (category === 'STOCK') {
+    systemPrompt = `你是一名“公司研究与商业叙事编辑”。任务：基于个股热词“${keyword}”，结合当前日期 ${today} 附近的公开信息，完成公司类型识别并输出“故事化素材池”。
+    
+    【强制搜索要求】你必须利用工具搜索并列出以下参考链接：
+    1. 视频：YouTube/Bilibili 深度拆解视频。
+    2. 音频：小宇宙/喜马拉雅/播客讨论。
+    3. 文本：财报、公告或核心财讯。
+
+    【输出结构要求】（严格遵守以下 JSON 逻辑）：
+    - company_type: (转型重生/顺周期/政策路径/技术突破/平台化)
+    - material_pool: {
+        hook_pack: 开场类比,
+        why_people_talk_now: 最近讨论焦点,
+        timeline: [时间线数组],
+        turning_points: 关键转折,
+        core_tensions: 核心矛盾,
+        profit_pool_shift: 利润池变化,
+        constraints_today: 当前约束,
+        validation_metrics: 观察指标
+    }
+    请在回答中包含所有搜索到的 URL。`;
+  } else {
+    systemPrompt = `你是一名“深度产业研究编辑 + 不确定性展开型信息整合 Agent”。任务：针对热词“${keyword}”，展开财经热词的“解释空间”。
+    
+    【强制搜索要求】你必须利用工具搜索并提供：
+    1. 视频：行业深度观察视频（B站/YouTube）。
+    2. 音频：播客节目中的行业讨论。
+    3. 文本：券商研报、政策原文、行业深度社论。
+
+    【输出结构要求】：
+    - industry_type: (技术范式/供需周期/政策驱动/重资产制造/平台生态)
+    - alternative_explanations: 2-4条并行的解释轴（政策轴、成本轴、对标轴等）
+    - material_pool: {
+        definition: 定义,
+        core_tensions: 核心矛盾,
+        power_structure: 权力结构,
+        profit_pool: 利润池与订单流,
+        irreversibles: 不可逆趋势,
+        validation_metrics: 验证点,
+        risks: 风险点
+    }
+    请在回答中包含所有搜索到的 URL。`;
+  }
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-3-pro-preview',
+    contents: systemPrompt,
+    config: {
+      tools: [{ googleSearch: {} }],
+    },
+  });
+
+  const metadata = response.candidates?.[0]?.groundingMetadata;
+  const linksMap = new Map<string, { title: string; uri: string; type: 'web' | 'video' | 'news' }>();
+
+  // 链接分类逻辑
+  const categorize = (url: string, title: string): 'web' | 'video' | 'news' => {
+    const lowUrl = url.toLowerCase();
+    const lowTitle = title.toLowerCase();
+    if (lowUrl.includes('youtube.com') || lowUrl.includes('bilibili.com') || lowTitle.includes('视频')) return 'video';
+    if (lowUrl.includes('podcast') || lowUrl.includes('xiaoyuzhou') || lowTitle.includes('播客') || lowTitle.includes('音频')) return 'news';
+    return 'web';
+  };
+
+  // 提取 Grounding 链接
+  if (metadata?.groundingChunks) {
+    metadata.groundingChunks.forEach((chunk: any) => {
+      if (chunk.web && chunk.web.uri) {
+        linksMap.set(chunk.web.uri, {
+          title: chunk.web.title || '深度参考',
+          uri: chunk.web.uri,
+          type: categorize(chunk.web.uri, chunk.web.title || '')
+        });
+      }
+    });
+  }
+
+  // 正则兜底提取 text 中的 URL
+  const text = response.text || '';
+  const urlRegex = /(https?:\/\/[^\s\)\],]+)/g;
+  const foundUrls = text.match(urlRegex);
+  if (foundUrls) {
+    foundUrls.forEach(url => {
+      const cleanUrl = url.replace(/[.\u3002]$/, '');
+      if (!linksMap.has(cleanUrl)) {
+        linksMap.set(cleanUrl, { title: '参考来源', uri: cleanUrl, type: categorize(cleanUrl, '') });
+      }
+    });
+  }
+
+  return {
+    text: text,
+    links: Array.from(linksMap.values()),
+    category: category
+  };
 }
 
 export async function generateEpisodeTitle(keyword: string, insights: string[]) {
@@ -23,53 +143,16 @@ export async function generateEpisodeTitle(keyword: string, insights: string[]) 
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
     contents: `请为关于“${keyword}”的财经播客起一个极具吸引力、专业的标题。参考爆点：${insights.join('; ')}。
-    要求：
-    1. 简洁有力，有点击欲望。
-    2. 只输出【一个】标题文字。
-    3. 不要输出“标题1、标题2”这种列表。
-    4. 不要任何前缀或引言。`,
+    要求：只输出【一个】标题文字，绝对不要列表。不要前缀。`,
   });
-  // Take only the first non-empty line and strip markdown/quotes
-  const title = response.text?.split('\n').find(l => l.trim().length > 0) || `${keyword} 深度观察`;
-  return title.replace(/[#*"]/g, '').trim();
-}
-
-export async function collectMaterials(keyword: string) {
-  const ai = getAI();
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: `关于财经热点词“${keyword}”，请深入搜集相关素材。重点关注：1. 核心政策导向 2. 产业利润池变化 3. 权力结构与核心矛盾 4. 关键财务指标。请提供详细的事实依据，并明确区分来源类型。`,
-    config: {
-      tools: [{ googleSearch: {} }],
-    },
-  });
-
-  const metadata = response.candidates?.[0]?.groundingMetadata;
-  const links: { title: string; uri: string; type: 'web' }[] = [];
-
-  if (metadata?.groundingChunks) {
-    metadata.groundingChunks.forEach((chunk: any) => {
-      if (chunk.web) {
-        links.push({
-          title: chunk.web.title || '参考来源',
-          uri: chunk.web.uri,
-          type: 'web'
-        });
-      }
-    });
-  }
-
-  return {
-    text: response.text || '未能获取到详细素材。',
-    links,
-  };
+  return (response.text?.split('\n').find(l => l.trim().length > 0) || `${keyword} 深度观察`).replace(/[#*"]/g, '').trim();
 }
 
 export async function designInsights(materials: string) {
   const ai = getAI();
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: `基于以下素材，设计3-5个财经播客的“爆点”。要求包括：开场金句、精妙类比、或者一个反常识的洞察（Insight）。素材内容：\n${materials}`,
+    contents: `基于以下素材，设计3-5个财经播客的“爆点”。要求：开场金句、精妙类比、或者一个反常识的洞察（Insight）。素材内容：\n${materials}`,
     config: {
       responseMimeType: "application/json",
       responseSchema: {
@@ -89,7 +172,7 @@ export async function generateOutline(keyword: string, insights: string[]) {
   const ai = getAI();
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: `请为关于“${keyword}”的财经播客生成一份逻辑大纲。要求：1. 明确因果路径 2. 确定解释顺序 3. 列出关键观察指标。已有的核心爆点：${insights.join('; ')}`,
+    contents: `请为关于“${keyword}”的财经播客生成一份逻辑大纲。要求：1. 明确因果路径 2. 确定解释顺序 3. 列出关键观察指标。参考爆点：${insights.join('; ')}`,
   });
   return response.text || '';
 }
@@ -98,16 +181,11 @@ export async function generateScript(outline: string) {
   const ai = getAI();
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: `请将以下播客大纲转化为“小王”与“张老师”的对话脚本。
-    要求：
-    1. 风格专业通俗，避免数字堆砌。
-    2. 严格按格式输出（使用中文冒号）：
-       小王：[话语]
-       张老师：[话语]
-    3. 只输出对话内容，不要任何开场白、介绍或制作人注释。
-    
-    大纲：
-    ${outline}`,
+    contents: `将以下大纲转化为“小王”与“张老师”的对话脚本。
+    格式：
+    小王：[话语]
+    张老师：[话语]
+    大纲：\n${outline}`,
   });
   return cleanScript(response.text || '');
 }
@@ -116,15 +194,7 @@ export async function reviewAndRefine(script: string) {
   const ai = getAI();
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: `作为资深播客制作人，请优化以下脚本：
-    1. 修复僵硬提问。
-    2. 扁平化复杂术语。
-    3. 清理投资建议。
-    4. 严格禁令：不要输出任何“制作人注释”、“优化逻辑说明”、“你好作为制作人”等元对话。
-    5. 只输出最终的【纯对话脚本】，不要标题，不要总结。
-    
-    待审核脚本：
-    ${script}`,
+    contents: `作为资深播客制作人，请优化以下脚本：去术语化，让对话像老友聊天。禁止输出非对话内容。\n${script}`,
   });
   return cleanScript(response.text || '');
 }
@@ -162,7 +232,6 @@ async function decodeAudioData(
 export async function synthesizePodcast(script: string, audioContext: AudioContext): Promise<AudioBuffer> {
   const ai = getAI();
   const cleanDialogue = cleanScript(script);
-  // Prepend a short intro for comfort
   const podcastText = `FinancePod AI 特约报道。${cleanDialogue.substring(0, 1500)}`;
 
   const response = await ai.models.generateContent({
@@ -188,14 +257,9 @@ export async function synthesizePodcast(script: string, audioContext: AudioConte
   });
 
   const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!base64Audio) throw new Error("音频合成失败 - 未能获取音频数据");
+  if (!base64Audio) throw new Error("音频合成失败");
 
-  return await decodeAudioData(
-    decode(base64Audio),
-    audioContext,
-    24000,
-    1
-  );
+  return await decodeAudioData(decode(base64Audio), audioContext, 24000, 1);
 }
 
 export function bufferToWav(buffer: AudioBuffer) {
@@ -204,30 +268,18 @@ export function bufferToWav(buffer: AudioBuffer) {
   const bufferArr = new ArrayBuffer(length);
   const view = new DataView(bufferArr);
   const channels = [];
-  let i;
-  let sample;
-  let offset = 0;
-  let pos = 0;
+  let i, sample, offset = 0, pos = 0;
 
-  setUint32(0x46464952); // "RIFF"
-  setUint32(length - 8); 
-  setUint32(0x45564157); // "WAVE"
+  const setUint16 = (data: any) => { view.setUint16(pos, data, true); pos += 2; };
+  const setUint32 = (data: any) => { view.setUint32(pos, data, true); pos += 4; };
 
-  setUint32(0x20746d66); // "fmt " chunk
-  setUint32(16); 
-  setUint16(1); 
-  setUint16(numOfChan);
-  setUint32(buffer.sampleRate);
-  setUint32(buffer.sampleRate * 2 * numOfChan);
-  setUint16(numOfChan * 2);
-  setUint16(16);
+  setUint32(0x46464952); setUint32(length - 8); setUint32(0x45564157);
+  setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(numOfChan);
+  setUint32(buffer.sampleRate); setUint32(buffer.sampleRate * 2 * numOfChan);
+  setUint16(numOfChan * 2); setUint16(16);
+  setUint32(0x61746164); setUint32(length - pos - 4);
 
-  setUint32(0x61746164); // "data"
-  setUint32(length - pos - 4);
-
-  for (i = 0; i < buffer.numberOfChannels; i++)
-    channels.push(buffer.getChannelData(i));
-
+  for (i = 0; i < buffer.numberOfChannels; i++) channels.push(buffer.getChannelData(i));
   while (pos < length) {
     for (i = 0; i < numOfChan; i++) {
       sample = Math.max(-1, Math.min(1, channels[i][offset]));
@@ -237,15 +289,5 @@ export function bufferToWav(buffer: AudioBuffer) {
     }
     offset++;
   }
-
   return new Blob([bufferArr], { type: "audio/wav" });
-
-  function setUint16(data: any) {
-    view.setUint16(pos, data, true);
-    pos += 2;
-  }
-  function setUint32(data: any) {
-    view.setUint32(pos, data, true);
-    pos += 4;
-  }
 }
