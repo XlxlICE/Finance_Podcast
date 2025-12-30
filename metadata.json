@@ -1,0 +1,7 @@
+{
+  "name": "FinancePod AI: Smart Financial Podcast Generator",
+  "description": "An automated financial podcast production platform that transforms hot keywords into professional-grade audio scripts and multi-speaker podcasts using Gemini AI.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
