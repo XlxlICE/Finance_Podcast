@@ -16,6 +16,7 @@ export interface PodcastContent {
   title?: string;
   materials?: string;
   hooks?: string[];
+  highlights?: { label: string; description: string }[];
   outline?: string;
   draftScript?: string;
   finalScript?: string;
