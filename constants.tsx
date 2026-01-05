@@ -11,7 +11,7 @@ export const STEPS_CONFIG: StepStatus[] = [
   {
     step: WorkflowStep.RESEARCH,
     label: '素材搜集',
-    icon: 'fa-magnifying-glass-chart',
+    icon: 'fa-magnifying-glass',
     description: '穿透政策、产业、利润池'
   },
   {
@@ -35,13 +35,13 @@ export const STEPS_CONFIG: StepStatus[] = [
   {
     step: WorkflowStep.REVIEW,
     label: '听感合规',
-    icon: 'fa-shield-check',
+    icon: 'fa-shield-halved',
     description: '去僵硬、去投资暗示'
   },
   {
     step: WorkflowStep.SYNTHESIS,
     label: '音频合成',
-    icon: 'fa-microphone-lines',
+    icon: 'fa-microphone',
     description: '双人专业音频播客合成'
   }
 ];
